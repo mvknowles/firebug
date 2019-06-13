@@ -1,0 +1,29 @@
+<!--
+WARNING: THIS IS AN AUTO-GENERATED FILE. CHANGES TO IT ARE LIKELY TO BE
+OVERWRITTEN AND LOST. Changes to this xml configuration should be made using:
+  virsh net-edit default
+or other application using the libvirt API.
+-->
+
+<network>
+  <name>default</name>
+  <uuid>5bf2bcf6-edf5-4978-bb50-f20b9066e331</uuid>
+  <forward dev='enp2s0' mode='route'>
+    <interface dev='enp2s0'/>
+  </forward>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <mac address='52:54:00:40:75:26'/>
+  <domain name='four.mknowles.dev' localOnly='no'/>
+  <ip address='172.16.5.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='172.16.5.100' end='172.16.5.200'/>
+      <host mac='52:54:00:aa:50:03' ip='172.16.5.100'/>
+      <host mac='52:54:00:aa:05:20' name='master-0.four.mknowles.dev' ip='172.16.5.20'/>
+      <host mac='52:54:00:aa:05:21' name='master-1.four.mknowles.dev' ip='172.16.5.21'/>
+      <host mac='52:54:00:aa:05:22' name='master-2.four.mknowles.dev' ip='172.16.5.22'/>
+      <host mac='52:54:00:aa:05:30' name='worker-0.four.mknowles.dev' ip='172.16.5.30'/>
+      <host mac='52:54:00:aa:05:31' name='worker-1.four.mknowles.dev' ip='172.16.5.31'/>
+      <host mac='52:54:00:aa:05:10' name='bootstrap.four.mknowles.dev' ip='172.16.5.10'/>
+    </dhcp>
+  </ip>
+</network>

@@ -1,0 +1,17 @@
+apiVersion: v1
+baseDomain: mknowles.dev
+compute:
+- name: worker
+  replicas: 1
+controlPlane:
+  name: master
+  replicas: 3
+metadata:
+  ## The name for the cluster
+  name: four
+platform:
+  none: {}
+## The pull secret that provides components in the cluster access to images for OpenShift components.
+pullSecret: ''
+## The default SSH key that will be programmed for `core` user.
+sshKey: ''

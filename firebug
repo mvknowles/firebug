@@ -1,0 +1,253 @@
+#!/usr/bin/env python2
+from __future__ import print_function
+
+import os
+import sys
+import json
+import base64
+import time
+import libvirt
+import threading
+import syslog
+import SocketServer
+import SimpleHTTPServer
+from xml.dom import minidom
+
+libvirt_dir = "/etc/libvirt/qemu"
+libvirt_bootstrap_name = "bootstrap"
+metadata_base_uri = "firebug.ns.mknowles.dev"
+metadata_xmlns = "firebug"
+
+libvirt_boot_root = "/opt/test-bare-metal"
+libvirt_boot_cmd_node = (
+      "ip=dhcp rd.neednet=1 "
+      "initrd=http://172.16.5.1:8000/rhcos-4.1.0-x86_64-installer-initramfs.img "
+      "console=ttyS0 coreos.inst=yes coreos.inst.install_dev=sda "
+      "coreos.inst.image_url=http://172.16.5.1:8000/rhcos-4.1.0-x86_64-metal-bios.raw "
+      "coreos.inst.ignition_url=http://172.16.5.1:8000/%s.ign")
+
+libvirt_boot_nodes = {
+        "kernel": "%s/rhcos-4.1.0-x86_64-installer-kernel" %
+            (libvirt_boot_root),
+        "initrd": "%s/rhcos-4.1.0-x86_64-installer-initramfs.img" %
+            (libvirt_boot_root),
+        "cmdline": libvirt_boot_cmd_node}
+
+conn = None
+syslog.openlog("firebug")
+
+def freak(reason, exit_code=1):
+    sys.stderr.write("%s\n" % (reason))
+    sys.exit(exit_code)
+
+def get_our_metadata(domain):
+    m = domain.metadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, metadata_base_uri, libvirt.VIR_DOMAIN_AFFECT_CURRENT) #, customXMLuri,
+    if m.startswith("<val>") == True:
+        s = m[5:-6]
+
+    s = base64.b64decode(s)
+    d = json.loads(s)
+
+    return d
+
+# WARNING: this is only for trusted clients, injection is obviously possible
+def set_our_metadata(domain, meta_dict, use_base64=True):
+
+    if use_base64 == True:
+        xml_nodes_str = json.dumps(meta_dict)
+        xml_nodes_str = base64.b64encode(xml_nodes_str) #'base64','strict')
+        xml_nodes_str = "<val>%s</val>" % (xml_nodes_str)
+
+    else:
+        xml_nodes = {}
+        for key, value in meta_dict.items():
+            xml_nodes.append("<%s>%s</%s>" % (key, value))
+        xml_nodes_str = "\n".join(xml_nodes) 
+
+    x = domain.setMetadata(libvirt.VIR_DOMAIN_METADATA_ELEMENT, xml_nodes_str, metadata_xmlns, metadata_base_uri, libvirt.VIR_DOMAIN_AFFECT_CONFIG) #libvirt.VIR_DOMAIN_AFFECT_CURRENT, meta_uri);
+
+def parse_domain_xml(domain_xml_desc):
+    doc = minidom.parseString(domain_xml_desc)
+    return doc
+
+
+def get_domain_desc(domain):
+    domain_xml = domain.XMLDesc(0)
+    
+    parsed_desc = parse_domain_xml(domain_xml)
+    return parsed_desc
+
+def get_all_domains():
+    domains = conn.listAllDomains(0)
+    return domains
+
+def remove_named_node(parent_node, node_name):
+
+    nodes = parent_node.getElementsByTagName(node_name)
+    if len(nodes) > 0:
+        parent_node.removeChild(nodes[0])
+
+def remove_kernel_boot(domain):
+    doc = get_domain_desc(domain)
+    os_node = doc.documentElement.getElementsByTagName("os")[0]
+
+    for node_name in libvirt_boot_nodes.keys():
+        remove_named_node(os_node, node_name)
+
+    xml_string = doc.toprettyxml()
+    new_domain = conn.defineXML(xml_string)
+    return new_domain
+
+
+def add_kernel_boot(domain, role):
+    doc = get_domain_desc(domain)
+    os_node = doc.documentElement.getElementsByTagName("os")[0]
+
+    for node_name, node_value in libvirt_boot_nodes.items():
+        if node_name == "cmdline":
+            node_value = libvirt_boot_nodes["cmdline"] % (role)
+        new_node = doc.createElement(node_name)
+        new_text_node = doc.createTextNode(node_value)
+        new_node.appendChild(new_text_node)
+        os_node.appendChild(new_node)
+
+    xml_string = doc.toprettyxml()
+    new_domain = conn.defineXML(xml_string)
+    return new_domain
+
+def modify_domain_xml(domain, callback):
+    doc = get_domain_desc(domain)
+
+    callback(domain, doc)
+
+    xml_string = doc.toprettyxml()
+    new_domain = conn.defineXML(xml_string)
+    return new_domain
+
+
+
+def libvirt_destroy_domain(domain):
+    while domain.state()[0] != libvirt.VIR_DOMAIN_SHUTOFF:
+        print(domain.state())
+        print("Destroying %s" % (domain.name()))
+        domain.destroy()
+
+class EventCallbackThread(threading.Thread):
+    def __init__(self):
+        super(EventCallbackThread, self).__init__()
+        self.syslog = syslog
+        self._shutdown = False
+
+    def run(self):
+        while True:
+            if self._shutdown == True:
+                break
+            libvirt.virEventRunDefaultImpl()
+
+        print("shutting down")
+
+    def event_callback(self, conn, domain, event, detail, opaque):
+        print("yo biatch")
+        print(domain.name)
+        print(event)
+
+    def reboot_callback(self, conn, domain, _):
+        print(domain)
+
+    def shutdown(self):
+        self._shutdown = True
+
+class WebserverThread(threading.Thread):
+    def __init__(self, root_path, bind=True):
+        super(WebserverThread, self).__init__()
+        self.port = 8000
+        self.bind_address = ""
+        self._shutdown = False
+        self.root_path = root_path
+
+        if bind == True:
+            Handler = SimpleHTTPServer.SimpleHTTPRequestHandler
+            self.httpd = SocketServer.TCPServer((self.bind_address,
+                self.port), Handler)
+            os.chdir(self.root_path)
+
+    def run(self):
+        while self._shutdown == False:
+            print("handle")
+            self.httpd.handle_request()
+            print("done")
+
+    def shutdown(self):
+        self._shutdown = True
+
+event_thread = EventCallbackThread()
+# needs to be done before conn open
+libvirt.virEventRegisterDefaultImpl()
+conn = libvirt.open('qemu:///session')
+
+conn.domainEventRegisterAny(None,libvirt.VIR_DOMAIN_EVENT_ID_LIFECYCLE,
+        event_thread.event_callback, conn)
+conn.domainEventRegisterAny(None,libvirt.VIR_DOMAIN_EVENT_ID_REBOOT,
+        event_thread.reboot_callback, conn)
+event_thread.start()
+
+print("paappp")
+webserver_thread = WebserverThread(libvirt_boot_root)
+print("post")
+
+def main():
+
+    #event_thread.setDaemon(True)
+    #libvirt.virEventRegisterImpl(event_thread.callback, event_thread.callback,
+    #        event_thread.callback,event_thread.callback,event_thread.callback,
+    #        event_thread.callback)
+    #libvirt.virEventRunDefaultImpl()
+
+    #conn = libvirt.open('qemu://127.0.0.1:16509')
+    conn.setKeepAlive(5, 3)
+    libvirt_namespace = "four.mknowles.dev"
+    destroy_all_ns = True
+    if libvirt_namespace != None:
+        libvirt_bootstrap_name = "bootstrap.%s" % (libvirt_namespace)
+
+    for domain in get_all_domains():
+        domain_state, _ = domain.state()
+        #print(domain.name(), domain_state)
+
+        if destroy_all_ns == True:
+            if domain.name().endswith(libvirt_namespace):
+                libvirt_destroy_domain(domain)
+        else:
+            if domain_state != libvirt.VIR_DOMAIN_SHUTOFF:
+                freak("not shut off, unmanaged")
+                libvirt_stop_domain(domain)
+
+    domain = conn.lookupByName(libvirt_bootstrap_name)
+    # remove kernel boot args
+    domain = remove_kernel_boot(domain)
+
+    # now put them back in
+    domain = add_kernel_boot(domain, "bootstrap")
+
+    print("Starting webserver")
+    webserver_thread.start()
+
+    print("Booting with kernel boot")
+    domain.create()
+    print(get_domain_desc(domain))
+
+    try:
+        while True:
+            time.sleep(1)
+    except Exception as e:
+        print(e)
+        event_thread.shutdown()
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        event_thread.shutdown()
+        webserver_thread.shutdown()
+        event_thread.join()
+        webserver_thread.join()
